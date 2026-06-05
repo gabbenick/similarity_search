@@ -1,9 +1,9 @@
-# similarity_search — Python dependencies
-# pip install -r requirements.txt
+numpy
+rasterio
+matplotlib
+scikit-learn          # one-class SVM + validation metrics
+geopandas             # validate.py — read/reproject ground-truth shapefile
 
-rasterio>=1.3.9
-numpy>=1.24.0
-opencv-python>=4.8.0
-scikit-image>=0.21.0
-scipy>=1.11.0
-matplotlib>=3.8.0
+# Only needed if you enable USE_TEXTURE / USE_EDGE in config.py (weak at 10 m):
+opencv-python
+scikit-image

@@ -1,18 +1,19 @@
 """
-search.py — Main entry point for the favela similarity search pipeline.
+search.py — Favela similarity search for multi-band Sentinel-2 imagery.
 
-Outputs
-───────
-  output/heatmap.tif         — continuous similarity map     (QGIS)
-  output/heatmap_norm.tif    — same, scaled 0-255            (QGIS)
-  output/svm_map.tif         — binary: 1=favela-like         (QGIS)
-  output/svm_map_score.tif   — continuous SVM decision score (QGIS)
-  output/features.csv        — per-window feature table
-  output/overview.png        — quick visual check
+Loads the 6 Sentinel-2 bands (B2,B3,B4,B8,B11,B12), resamples the 20 m SWIR
+bands onto the 10 m grid, extracts spectral + index features per sliding window,
+and compares each window to a known favela reference zone.
 
-Run
-───
-    python search.py
+Outputs (in output/):
+  heatmap.tif         continuous similarity map        (QGIS)
+  heatmap_norm.tif    same, scaled 0-255               (QGIS)
+  svm_map.tif         binary: 1=favela-like            (QGIS)
+  svm_map_score.tif   continuous SVM decision score    (QGIS)
+  features.csv        per-window feature table
+  overview.png        quick visual check
+
+Run:  python search.py
 """
 
 import os
@@ -20,6 +21,7 @@ import sys
 import csv
 import numpy as np
 import rasterio
+from rasterio.warp import reproject, Resampling
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -29,23 +31,98 @@ import config
 from extract_features import (
     extract_all_windows,
     extract_reference_patches,
-    extract_reference_vector,
     feature_names,
 )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Multi-band loading (with resampling to a common 10 m grid)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def reference_profile():
+    """Profile/grid that every band is resampled onto (from REFERENCE_BAND)."""
+    if config.USE_STACKED:
+        path = config.STACKED_PATH
+    else:
+        path = config.BANDS[config.REFERENCE_BAND]
+    if not os.path.isfile(path):
+        print(f"\n❌ Reference band not found: {path}")
+        sys.exit(1)
+    with rasterio.open(path) as src:
+        return src.profile.copy()
+
+
+def _read_band_on_grid(path, band_index, ref_prof):
+    """Read one band and resample it onto the reference grid."""
+    with rasterio.open(path) as src:
+        src_arr = src.read(band_index).astype(np.float32)
+        same_grid = (src.width == ref_prof["width"] and
+                     src.height == ref_prof["height"] and
+                     src.transform == ref_prof["transform"])
+        if same_grid:
+            return src_arr
+        dst = np.zeros((ref_prof["height"], ref_prof["width"]), np.float32)
+        reproject(
+            source=src_arr, destination=dst,
+            src_transform=src.transform, src_crs=src.crs,
+            dst_transform=ref_prof["transform"], dst_crs=ref_prof["crs"],
+            resampling=Resampling.bilinear)
+        return dst
+
+
+def load_multiband(ref_prof):
+    """Return image (H, W, n_bands) in config.BAND_ORDER, on the 10 m grid."""
+    bands = []
+    for name in config.BAND_ORDER:
+        if config.USE_STACKED:
+            arr = _read_band_on_grid(
+                config.STACKED_PATH, config.STACKED_BAND_INDEX[name], ref_prof)
+        else:
+            path = config.BANDS[name]
+            if not os.path.isfile(path):
+                print(f"\n❌ Band file not found: {path}")
+                sys.exit(1)
+            arr = _read_band_on_grid(path, 1, ref_prof)
+        bands.append(arr)
+        print(f"   {name}: loaded ({arr.shape[0]}×{arr.shape[1]})")
+    return np.stack(bands, axis=-1)   # (H, W, n_bands)
+
+
+def make_rgb_display(image):
+    """Percentile-stretched natural-colour composite for the overview PNG."""
+    chans = []
+    for name in config.RGB_DISPLAY_BANDS:
+        b = image[:, :, config.BAND_ORDER.index(name)].astype(np.float32)
+        lo, hi = np.nanpercentile(b, 2), np.nanpercentile(b, 98)
+        b = np.clip((b - lo) / (hi - lo + 1e-8), 0, 1)
+        chans.append(b)
+    return (np.stack(chans, axis=-1) * 255).astype(np.uint8)
+
+
+def load_extra(path, label, as_int=False):
+    if not os.path.isfile(path):
+        print(f"   ⚠️  {label} not found ({path}) — skipping")
+        return None
+    with rasterio.open(path) as src:
+        arr = src.read(1).astype(np.float32)
+    if as_int:
+        arr = arr.astype(np.int32)
+    print(f"   {label} loaded: {path}")
+    return arr
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Similarity metrics
 # ─────────────────────────────────────────────────────────────────────────────
 
-def cosine_similarity(ref: np.ndarray, features: np.ndarray) -> np.ndarray:
+def cosine_similarity(ref, features):
     ref_norm   = ref / (np.linalg.norm(ref) + 1e-8)
     feat_norms = np.linalg.norm(features, axis=1, keepdims=True) + 1e-8
     scores     = (features / feat_norms) @ ref_norm
     return (scores + 1.0) / 2.0
 
 
-def euclidean_similarity(ref: np.ndarray, features: np.ndarray) -> np.ndarray:
+def euclidean_similarity(ref, features):
     dists = np.linalg.norm(features - ref[np.newaxis, :], axis=1)
     return 1.0 / (1.0 + dists)
 
@@ -53,7 +130,11 @@ def euclidean_similarity(ref: np.ndarray, features: np.ndarray) -> np.ndarray:
 def compute_similarity(ref, features):
     if config.SIMILARITY_METRIC == "cosine":
         return cosine_similarity(ref, features)
-    return euclidean_similarity(ref, features)
+    if config.SIMILARITY_METRIC == "euclidean":
+        return euclidean_similarity(ref, features)
+    print(f"   ⚠️  Unknown SIMILARITY_METRIC "
+          f"'{config.SIMILARITY_METRIC}' — using cosine")
+    return cosine_similarity(ref, features)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -61,10 +142,6 @@ def compute_similarity(ref, features):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def normalise_features(ref_vec, ref_patches, all_features):
-    """
-    Normalise using global statistics from all windows.
-    Returns normalised versions of ref_vec, ref_patches, all_features.
-    """
     mean = all_features.mean(axis=0)
     std  = all_features.std(axis=0) + 1e-8
     return ((ref_vec     - mean) / std,
@@ -77,8 +154,8 @@ def normalise_features(ref_vec, ref_patches, all_features):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_heatmap(origins, scores, image_shape):
-    H, W     = image_shape[:2]
-    ws       = config.WINDOW_SIZE
+    H, W      = image_shape[:2]
+    ws        = config.WINDOW_SIZE
     score_sum = np.zeros((H, W), dtype=np.float32)
     count     = np.zeros((H, W), dtype=np.float32)
     for (r, c), score in zip(origins, scores):
@@ -91,7 +168,7 @@ def build_heatmap(origins, scores, image_shape):
 #  Save GeoTIFFs
 # ─────────────────────────────────────────────────────────────────────────────
 
-def save_tif(data: np.ndarray, profile: dict, path: str, dtype="float32"):
+def save_tif(data, profile, path, dtype="float32"):
     p = profile.copy()
     p.update(count=1, dtype=dtype, compress="lzw", nodata=None)
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -102,36 +179,26 @@ def save_tif(data: np.ndarray, profile: dict, path: str, dtype="float32"):
     print(f"  Saved → {path}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  Save feature CSV
-# ─────────────────────────────────────────────────────────────────────────────
-
-def save_features_csv(origins, features, scores, src_profile):
-    transform = src_profile["transform"]
+def save_features_csv(origins, features, scores, ref_prof):
+    transform = ref_prof["transform"]
     names     = feature_names()
     with open(config.FEATURES_CSV, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["row", "col", "map_x", "map_y",
-                         "similarity"] + names)
+        writer.writerow(["row", "col", "map_x", "map_y", "similarity"] + names)
         for (r, c), score, feat in zip(origins, scores, features):
             cx = transform.c + (c + config.WINDOW_SIZE/2) * transform.a
             cy = transform.f + (r + config.WINDOW_SIZE/2) * transform.e
             writer.writerow([r, c, f"{cx:.4f}", f"{cy:.4f}",
-                             f"{score:.6f}"] +
-                            [f"{v:.6f}" for v in feat])
+                             f"{score:.6f}"] + [f"{v:.6f}" for v in feat])
     print(f"  Saved → {config.FEATURES_CSV}")
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  Overview PNG
-# ─────────────────────────────────────────────────────────────────────────────
 
 def save_overview(image_rgb, heatmap, binary_map=None):
     n_panels = 3 if binary_map is None else 4
     fig, axes = plt.subplots(1, n_panels, figsize=(6*n_panels, 6))
 
     axes[0].imshow(image_rgb)
-    axes[0].set_title("RGB Image", fontsize=11)
+    axes[0].set_title("Sentinel-2 (B4-B3-B2)", fontsize=11)
     axes[0].axis("off")
 
     axes[1].imshow(image_rgb)
@@ -139,8 +206,7 @@ def save_overview(image_rgb, heatmap, binary_map=None):
         (config.REFERENCE_COL_MIN, config.REFERENCE_ROW_MIN),
         config.REFERENCE_COL_MAX - config.REFERENCE_COL_MIN,
         config.REFERENCE_ROW_MAX - config.REFERENCE_ROW_MIN,
-        linewidth=2, edgecolor="yellow", facecolor="none"
-    )
+        linewidth=2, edgecolor="yellow", facecolor="none")
     axes[1].add_patch(rect)
     axes[1].set_title("Reference zone (yellow)", fontsize=11)
     axes[1].axis("off")
@@ -157,7 +223,7 @@ def save_overview(image_rgb, heatmap, binary_map=None):
                           fontsize=11)
         axes[3].axis("off")
 
-    plt.suptitle("Favela Similarity Search", fontsize=13)
+    plt.suptitle("Favela Similarity Search — Sentinel-2", fontsize=13)
     plt.tight_layout()
     plt.savefig(config.OVERVIEW_PNG, dpi=150, bbox_inches="tight",
                 facecolor="white")
@@ -166,115 +232,91 @@ def save_overview(image_rgb, heatmap, binary_map=None):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Load raster helper
-# ─────────────────────────────────────────────────────────────────────────────
-
-def load_raster(path, as_rgb=False):
-    with rasterio.open(path) as src:
-        data    = src.read()
-        profile = src.profile.copy()
-    if as_rgb:
-        data = np.transpose(data, (1, 2, 0))[:, :, :3]
-        if data.dtype != np.uint8:
-            mn, mx = data.min(), data.max()
-            data = ((data - mn) / (mx - mn + 1e-8) * 255).astype(np.uint8)
-    else:
-        data = data[0].astype(np.float32)
-    return data, profile
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 #  Main
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
     print("=" * 58)
-    print("  Favela Similarity Search")
+    print("  Favela Similarity Search — Sentinel-2")
     print("=" * 58)
 
-    # ── validate files ────────────────────────────────────────────────────
-    if not os.path.isfile(config.IMAGE_PATH):
-        print(f"\n❌ Image not found: {config.IMAGE_PATH}")
-        sys.exit(1)
+    # ── grid + bands ──────────────────────────────────────────────────────
+    ref_prof = reference_profile()
+    H, W = ref_prof["height"], ref_prof["width"]
+    pixel_size = abs(ref_prof["transform"].a)
+    print(f"\n📂 Loading {len(config.BAND_ORDER)} bands "
+          f"(grid {H}×{W}, {pixel_size:.0f} m/px) ...")
+    image = load_multiband(ref_prof)
+    print(f"   Ground extent ≈ {H*pixel_size:.0f} m × {W*pixel_size:.0f} m")
 
-    # ── load RGB image ────────────────────────────────────────────────────
-    print(f"\n📂 Loading image ...")
-    image_rgb, src_profile = load_raster(config.IMAGE_PATH, as_rgb=True)
-    H, W = image_rgb.shape[:2]
-    pixel_size = abs(src_profile["transform"].a)
-    print(f"   {H} × {W} px  |  {pixel_size}m/px  |  "
-          f"{H*pixel_size:.0f}m × {W*pixel_size:.0f}m")
+    # ── optional extra sources ────────────────────────────────────────────
+    image_dsm = load_extra(config.DSM_PATH, "DSM") if config.USE_DSM else None
+    image_rf  = load_extra(config.RF_PATH, "RF map", as_int=True) if config.USE_RF else None
 
-    # ── load DSM ──────────────────────────────────────────────────────────
-    image_dsm = None
-    if config.USE_DSM:
-        if os.path.isfile(config.DSM_PATH):
-            image_dsm, _ = load_raster(config.DSM_PATH)
-            print(f"   DSM loaded: {config.DSM_PATH}")
-        else:
-            print(f"   ⚠️  DSM not found ({config.DSM_PATH}) — skipping")
+    # ── keep feature_names() consistent if a source is missing ────────────
+    if config.USE_DSM and image_dsm is None:
+        config.USE_DSM = False
+    if config.USE_RF and image_rf is None:
+        config.USE_RF = False
 
-    # ── load RF map ───────────────────────────────────────────────────────
-    image_rf = None
-    if config.USE_RF:
-        if os.path.isfile(config.RF_PATH):
-            image_rf, _ = load_raster(config.RF_PATH)
-            image_rf = image_rf.astype(np.int32)
-            print(f"   RF map loaded: {config.RF_PATH}")
-            print(f"   RF classes found: {np.unique(image_rf).tolist()}")
-        else:
-            print(f"   ⚠️  RF map not found ({config.RF_PATH}) — skipping RF features")
-
-    # ── active features summary ───────────────────────────────────────────
-    print(f"\n   Active features: ", end="")
+    # ── active features ───────────────────────────────────────────────────
     active = []
     if config.USE_SPECTRAL: active.append("spectral")
+    if config.USE_INDICES:  active.append("indices(" + ",".join(config.INDICES) + ")")
     if config.USE_TEXTURE:  active.append("texture")
     if config.USE_EDGE:     active.append("edge")
-    if config.USE_DSM and image_dsm is not None: active.append("DSM")
-    if config.USE_RF  and image_rf  is not None: active.append("RF-composition")
-    print(" + ".join(active))
+    if config.USE_DSM:      active.append("DSM")
+    if config.USE_RF:       active.append("RF")
+    print(f"\n   Active features: " + " + ".join(active))
     print(f"   Total features : {len(feature_names())}")
 
-    # ── validate reference zone ───────────────────────────────────────────
-    print(f"\n📍 Reference zone:")
-    print(f"   Rows {config.REFERENCE_ROW_MIN}–{config.REFERENCE_ROW_MAX}  "
-          f"Cols {config.REFERENCE_COL_MIN}–{config.REFERENCE_COL_MAX}")
+    # ── reference zone sanity ─────────────────────────────────────────────
     zone_h = config.REFERENCE_ROW_MAX - config.REFERENCE_ROW_MIN
     zone_w = config.REFERENCE_COL_MAX - config.REFERENCE_COL_MIN
-    print(f"   {zone_h}×{zone_w} px  =  "
-          f"{zone_h*pixel_size:.0f}m × {zone_w*pixel_size:.0f}m on the ground")
+    print(f"\n📍 Reference zone: rows "
+          f"{config.REFERENCE_ROW_MIN}–{config.REFERENCE_ROW_MAX}  cols "
+          f"{config.REFERENCE_COL_MIN}–{config.REFERENCE_COL_MAX}  "
+          f"({zone_h}×{zone_w} px = {zone_h*pixel_size:.0f}×{zone_w*pixel_size:.0f} m)")
+    if (config.REFERENCE_ROW_MAX > H or config.REFERENCE_COL_MAX > W or
+            config.REFERENCE_ROW_MIN < 0 or config.REFERENCE_COL_MIN < 0):
+        print(f"   ⚠️  Reference zone falls outside the image ({H}×{W})! "
+              f"Re-derive coords with coords.py.")
 
-    # ── extract reference ─────────────────────────────────────────────────
+    # ── reference features ────────────────────────────────────────────────
     print(f"\n🎯 Extracting reference features ...")
-    ref_patches = extract_reference_patches(image_rgb, image_dsm, image_rf)
+    ref_patches = extract_reference_patches(image, image_dsm, image_rf)
     ref_vec     = ref_patches.mean(axis=0)
 
-    # ── extract all windows ───────────────────────────────────────────────
+    # ── all windows ───────────────────────────────────────────────────────
     print(f"\n🔲 Sliding window across full image ...")
-    origins, all_features = extract_all_windows(image_rgb, image_dsm, image_rf)
+    origins, all_features = extract_all_windows(image, image_dsm, image_rf)
 
     # ── normalise ─────────────────────────────────────────────────────────
     print(f"\n📐 Normalising features ...")
     ref_norm, ref_patches_norm, feat_norm = normalise_features(
         ref_vec, ref_patches, all_features)
 
-    # ── similarity scores ─────────────────────────────────────────────────
+    # ── similarity ────────────────────────────────────────────────────────
     scores = compute_similarity(ref_norm, feat_norm)
     print(f"   Scores:  min={scores.min():.4f}  "
           f"max={scores.max():.4f}  mean={scores.mean():.4f}")
+    if scores.max() - scores.min() < 0.01:
+        print("   ⚠️  Score range almost flat — features may be constant; "
+              "check inputs / reference zone.")
 
     print(f"\n   Top 5 most similar windows:")
     for rank, idx in enumerate(np.argsort(scores)[::-1][:5]):
         r, c = origins[idx]
-        print(f"   #{rank+1}  row={r:4d}  col={c:4d}  "
-              f"score={scores[idx]:.4f}")
+        print(f"   #{rank+1}  row={r:4d}  col={c:4d}  score={scores[idx]:.4f}")
 
-    # ── build and save similarity heatmap ─────────────────────────────────
+    # ── heatmap ───────────────────────────────────────────────────────────
     print(f"\n🗺  Building heatmap ...")
-    heatmap = build_heatmap(origins, scores, image_rgb.shape)
-    save_tif(heatmap, src_profile, config.HEATMAP_PATH,      "float32")
-    save_tif(heatmap, src_profile, config.HEATMAP_NORM_PATH, "uint8")
+    heatmap = build_heatmap(origins, scores, (H, W))
+    if np.any(~np.isfinite(heatmap)):
+        print("   ⚠️  Heatmap contains NaN/Inf — replacing with 0.")
+        heatmap = np.nan_to_num(heatmap)
+    save_tif(heatmap, ref_prof, config.HEATMAP_PATH,      "float32")
+    save_tif(heatmap, ref_prof, config.HEATMAP_NORM_PATH, "uint8")
 
     # ── one-class SVM ─────────────────────────────────────────────────────
     binary_map = None
@@ -283,34 +325,21 @@ def main():
         try:
             from oneclass import run_one_class_svm
             binary_map, _ = run_one_class_svm(
-                ref_patches_norm, feat_norm,
-                origins, image_rgb.shape, src_profile)
+                ref_patches_norm, feat_norm, origins, (H, W), ref_prof)
         except ImportError:
-            print("   scikit-learn not installed — skipping SVM")
-            print("   pip install scikit-learn")
+            print("   scikit-learn not installed — skipping SVM "
+                  "(pip install scikit-learn)")
 
-    # ── CSV ───────────────────────────────────────────────────────────────
+    # ── CSV + overview ────────────────────────────────────────────────────
     print(f"\n💾 Saving feature table ...")
-    save_features_csv(origins, all_features, scores, src_profile)
+    save_features_csv(origins, all_features, scores, ref_prof)
 
-    # ── overview PNG ──────────────────────────────────────────────────────
     print(f"\n🖼  Saving overview ...")
-    save_overview(image_rgb, heatmap, binary_map)
+    save_overview(make_rgb_display(image), heatmap, binary_map)
 
-    # ── final instructions ────────────────────────────────────────────────
-    print(f"\n{'='*58}")
-    print(f"  Done.")
-    print(f"{'='*58}")
-    print(f"\n  Load in QGIS:")
-    print(f"    heatmap.tif      → Singleband pseudocolor, Reds")
-    print(f"    svm_map.tif      → Paletted/Unique values")
-    print(f"                       1=favela-like  0=other")
-    print(f"    features.csv     → inspect per-window values")
-    print(f"\n  When RF map arrives:")
-    print(f"    1. Copy it to data/rf_map.tif")
-    print(f"    2. Set USE_RF = True in config.py")
-    print(f"    3. Run python search.py again")
-    print()
+    print(f"\n{'='*58}\n  Done.\n{'='*58}")
+    print(f"\n  Next: validate against ground-truth polygons:")
+    print(f"    python validate.py --truth data/favelas.shp\n")
 
 
 if __name__ == "__main__":

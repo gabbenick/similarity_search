@@ -1,73 +1,105 @@
 """
-config.py — Similarity Search Pipeline Configuration
+config.py — Similarity Search Pipeline Configuration (Sentinel-2 edition)
+
+Adapted for multi-band Sentinel-2 imagery (B2, B3, B4, B8, B11, B12).
+Key differences from the original aerial (0.5 m) version:
+  • Multi-band loading + resampling 20 m bands (B11/B12) to the 10 m grid
+  • Spectral features generalised to N bands
+  • Spectral INDICES (NDVI, NDBI, BSI, MNDWI, SWIR ratio) — the real strength
+    of Sentinel-2 for material/land-cover discrimination
+  • Texture / edge OFF by default (meaningless at 10 m/px)
+  • Window size in pixels rethought for 10 m resolution
 """
 
 import os
 
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
-IMAGE_PATH = os.path.join(BASE_DIR, "data", "image.tif")
+DATA_DIR   = os.path.join(BASE_DIR, "data")
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Sliding window
+#  Sentinel-2 bands
 # ─────────────────────────────────────────────────────────────────────────────
-WINDOW_SIZE = 200    # pixels  (100m × 100m at 50cm/px)
-STRIDE      = 100    # pixels  (50% overlap)
+# The ORDER here defines the order of spectral features and the band names the
+# index formulas refer to. Keep the 6 standard names unless you adapt the index
+# functions in extract_features.py.
+BAND_ORDER = ["B2", "B3", "B4", "B8", "B11", "B12"]
+
+# ── Option A: one GeoTIFF per band (default) ─────────────────────────────────
+USE_STACKED = False
+BANDS = {
+    "B2":  os.path.join(DATA_DIR, "B2.tif"),
+    "B3":  os.path.join(DATA_DIR, "B3.tif"),
+    "B4":  os.path.join(DATA_DIR, "B4.tif"),
+    "B8":  os.path.join(DATA_DIR, "B8.tif"),
+    "B11": os.path.join(DATA_DIR, "B11.tif"),
+    "B12": os.path.join(DATA_DIR, "B12.tif"),
+}
+
+# ── Option B: a single multi-band GeoTIFF (set USE_STACKED = True) ────────────
+STACKED_PATH = os.path.join(DATA_DIR, "sentinel2_stack.tif")
+# 1-based band index of each name inside the stacked file:
+STACKED_BAND_INDEX = {"B2": 1, "B3": 2, "B4": 3, "B8": 4, "B11": 5, "B12": 6}
+
+# Reference band that defines the output grid (10 m). All other bands are
+# resampled onto this grid. coords.py also uses this as IMAGE_PATH.
+REFERENCE_BAND = "B2"
+IMAGE_PATH = (STACKED_PATH if USE_STACKED else BANDS[REFERENCE_BAND])
+
+# Natural-colour composite (B4-B3-B2) for the overview PNG / reference preview.
+RGB_DISPLAY_BANDS = ["B4", "B3", "B2"]
+
+# Target pixel size after resampling (metres). Sentinel-2 native: 10 m.
+PIXEL_SIZE_M = 10
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Reference zone — your known favela area (pixel coordinates)
+#  Sliding window  — re-think for 10 m/px!
 # ─────────────────────────────────────────────────────────────────────────────
-# Your QGIS map coordinates for the two corners:
-#   Top-left     : X=187211.06  Y=8950614.91
-#   Bottom-right : X=187340.97  Y=8950498.11
-# Converted to pixels using coords.py → values below.
-
-REFERENCE_COL_MIN = 925
-REFERENCE_COL_MAX = 1125
-REFERENCE_ROW_MIN = 1750
-REFERENCE_ROW_MAX = 1950
+# At 10 m/px:  WINDOW_SIZE px  ->  WINDOW_SIZE * 10 m on the ground.
+#   30 px = 300 m, 50 px = 500 m. Favelas are detected at AGGLOMERATION scale,
+#   not building scale. Tune to your target.
+WINDOW_SIZE = 30     # px  = 300 m on the ground
+STRIDE      = 15     # px  = 50% overlap
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  RGB + texture + edge features
+#  Reference zone — your known favela area (PIXEL coords ON THE 10 m GRID)
 # ─────────────────────────────────────────────────────────────────────────────
-USE_SPECTRAL = True   # per-channel mean + std              (6 values)
-USE_TEXTURE  = True   # GLCM contrast, homogeneity, etc.   (4 values)
-USE_EDGE     = True   # Canny edge density                  (1 value)
+#  IMPORTANT: these MUST be re-derived for the Sentinel-2 image. The old aerial
+#  pixel coordinates do NOT apply. Use coords.py with your QGIS map coordinates:
+#       python coords.py --x <easting> --y <northing>
+#  then set the bounding box below. The zone must be at least WINDOW_SIZE px.
+REFERENCE_COL_MIN = 0      # ← EDIT ME
+REFERENCE_COL_MAX = 60     # ← EDIT ME
+REFERENCE_ROW_MIN = 0      # ← EDIT ME
+REFERENCE_ROW_MAX = 60     # ← EDIT ME
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  DSM / slope features
+#  Feature groups
 # ─────────────────────────────────────────────────────────────────────────────
-USE_DSM  = True
-DSM_PATH = os.path.join(BASE_DIR, "data", "dsm.tif")
+USE_SPECTRAL = True    # per-band mean + std            (2 × n_bands values)
+USE_INDICES  = True    # spectral indices               (2 × n_indices values)
+USE_TEXTURE  = False   # GLCM on TEXTURE_BAND — WEAK at 10 m, off by default
+USE_EDGE     = False   # Canny on TEXTURE_BAND — WEAK at 10 m, off by default
+TEXTURE_BAND = "B8"    # which band to compute texture/edge on, if enabled
+
+# Spectral indices to compute (each contributes mean + std).
+# Formulas live in extract_features.py and assume the 6 standard bands.
+#   NDVI  = (B8  - B4) / (B8  + B4)     vegetation      (favela: low)
+#   NDBI  = (B11 - B8) / (B11 + B8)     built-up        (favela: high)
+#   BSI   = ((B11+B4)-(B8+B2)) / ((B11+B4)+(B8+B2))   bare soil (favela: high)
+#   MNDWI = (B3 - B11) / (B3 + B11)     water / shadow
+#   SWIR_RATIO = B11 / B12              roof-material discrimination
+INDICES = ["NDVI", "NDBI", "BSI", "MNDWI", "SWIR_RATIO"]
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Random Forest composition features
+#  DSM / RF — optional extra sources (must be aligned to the 10 m grid)
 # ─────────────────────────────────────────────────────────────────────────────
-# Set USE_RF = True when you receive the RF classification map.
-# Drop the file into data/rf_map.tif and flip the flag — nothing else changes.
-#
-# Expected RF class IDs (must match the other student's output):
-#   1 = Exposed Soil
-#   2 = Ceramic Roof
-#   3 = Fiber Cement Roof
-#   4 = Paved Road
-#   5 = Dense Vegetation
-#   6 = Light Vegetation
-#   7 = Tile Pavement
-#
-# Features computed per window from the RF map:
-#   pct_ceramic      — % ceramic roof pixels
-#   pct_fiber        — % fiber cement pixels
-#   pct_paved_road   — % paved road pixels
-#   pct_exposed_soil — % exposed soil pixels
-#   pct_vegetation   — % dense + light vegetation pixels
-#   informality_idx  — ceramic + fiber + soil  (high = informal)
-#   formality_idx    — paved road + vegetation (high = formal)
+USE_DSM  = False
+DSM_PATH = os.path.join(DATA_DIR, "dsm.tif")
 
-USE_RF   = True   # ← flip to True when rf_map.tif is ready
-RF_PATH  = os.path.join(BASE_DIR, "data", "rf_map.tif")
-
+USE_RF   = False
+RF_PATH  = os.path.join(DATA_DIR, "rf_map.tif")
 RF_CLASS_IDS = {
     "exposed_soil"    : 1,
     "ceramic_roof"    : 2,
@@ -81,14 +113,6 @@ RF_CLASS_IDS = {
 # ─────────────────────────────────────────────────────────────────────────────
 #  One-class SVM
 # ─────────────────────────────────────────────────────────────────────────────
-# Trained only on windows from the reference favela zone.
-# Produces a binary map: inside favela distribution / outside.
-# Runs automatically alongside the similarity heatmap.
-#
-# nu     : upper bound on fraction of outliers (0.0–1.0)
-#          lower = tighter boundary around the reference
-# kernel : "rbf" works well for most cases
-
 USE_ONE_CLASS_SVM = True
 SVM_NU            = 0.1
 SVM_KERNEL        = "rbf"
@@ -104,5 +128,6 @@ SIMILARITY_METRIC = "cosine"   # "cosine" | "euclidean"
 HEATMAP_PATH      = os.path.join(OUTPUT_DIR, "heatmap.tif")
 HEATMAP_NORM_PATH = os.path.join(OUTPUT_DIR, "heatmap_norm.tif")
 SVM_MAP_PATH      = os.path.join(OUTPUT_DIR, "svm_map.tif")
+SVM_SCORE_PATH    = os.path.join(OUTPUT_DIR, "svm_map_score.tif")
 FEATURES_CSV      = os.path.join(OUTPUT_DIR, "features.csv")
 OVERVIEW_PNG      = os.path.join(OUTPUT_DIR, "overview.png")
