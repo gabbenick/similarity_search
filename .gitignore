@@ -1,1 +1,6 @@
 venv/
+.claude/
+__pycache__/
+data/
+comunidades/
+output/

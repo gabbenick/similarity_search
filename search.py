@@ -111,6 +111,61 @@ def load_extra(path, label, as_int=False):
     return arr
 
 
+def load_dsm(ref_prof):
+    """Load DSM and reproject it onto the Sentinel-2 reference grid."""
+    if not os.path.isfile(config.DSM_PATH):
+        print(f"   ⚠️  DSM not found: {config.DSM_PATH} — skipping")
+        return None
+    with rasterio.open(config.DSM_PATH) as src:
+        dst = np.full((ref_prof["height"], ref_prof["width"]), np.nan, dtype=np.float32)
+        reproject(
+            source=rasterio.band(src, 1),
+            destination=dst,
+            src_transform=src.transform, src_crs=src.crs,
+            dst_transform=ref_prof["transform"], dst_crs=ref_prof["crs"],
+            resampling=Resampling.bilinear,
+        )
+        if src.nodata is not None:
+            dst[dst == src.nodata] = np.nan
+    valid_px = int(np.isfinite(dst).sum())
+    print(f"   DSM reprojected to image grid: {valid_px:,} valid pixels "
+          f"(h={np.nanmin(dst):.0f}–{np.nanmax(dst):.0f} m)")
+    return dst
+
+
+def rasterize_reference(ref_prof):
+    """Rasterize train.shp onto the image grid; returns bool mask or None."""
+    if not config.REFERENCE_SHAPEFILE:
+        return None
+    if not os.path.isfile(config.REFERENCE_SHAPEFILE):
+        print(f"   ⚠️  REFERENCE_SHAPEFILE not found: {config.REFERENCE_SHAPEFILE}")
+        return None
+    try:
+        import geopandas as gpd
+        from rasterio.features import rasterize as rio_rasterize
+    except ImportError:
+        print("   ⚠️  geopandas not installed — falling back to bounding-box reference")
+        return None
+
+    gdf = gpd.read_file(config.REFERENCE_SHAPEFILE)
+    if gdf.crs is not None and str(gdf.crs) != str(ref_prof["crs"]):
+        gdf = gdf.to_crs(ref_prof["crs"])
+    shapes = [(geom, 1) for geom in gdf.geometry if geom is not None and not geom.is_empty]
+    if not shapes:
+        print("   ⚠️  No valid geometries in training shapefile")
+        return None
+    mask = rio_rasterize(
+        shapes,
+        out_shape=(ref_prof["height"], ref_prof["width"]),
+        transform=ref_prof["transform"],
+        fill=0, dtype=np.uint8,
+    ).astype(bool)
+    communities = gdf["community"].unique() if "community" in gdf.columns else ["?"]
+    print(f"   Training mask: {mask.sum():,} px from {len(shapes)} polygons "
+          f"({', '.join(communities)})")
+    return mask
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Similarity metrics
 # ─────────────────────────────────────────────────────────────────────────────
@@ -250,7 +305,7 @@ def main():
     print(f"   Ground extent ≈ {H*pixel_size:.0f} m × {W*pixel_size:.0f} m")
 
     # ── optional extra sources ────────────────────────────────────────────
-    image_dsm = load_extra(config.DSM_PATH, "DSM") if config.USE_DSM else None
+    image_dsm = load_dsm(ref_prof) if config.USE_DSM else None
     image_rf  = load_extra(config.RF_PATH, "RF map", as_int=True) if config.USE_RF else None
 
     # ── keep feature_names() consistent if a source is missing ────────────
@@ -282,9 +337,13 @@ def main():
         print(f"   ⚠️  Reference zone falls outside the image ({H}×{W})! "
               f"Re-derive coords with coords.py.")
 
+    # ── training reference mask ───────────────────────────────────────────
+    print(f"\n🗂  Loading training reference ...")
+    ref_mask = rasterize_reference(ref_prof)
+
     # ── reference features ────────────────────────────────────────────────
     print(f"\n🎯 Extracting reference features ...")
-    ref_patches = extract_reference_patches(image, image_dsm, image_rf)
+    ref_patches = extract_reference_patches(image, image_dsm, image_rf, ref_mask)
     ref_vec     = ref_patches.mean(axis=0)
 
     # ── all windows ───────────────────────────────────────────────────────
@@ -339,7 +398,7 @@ def main():
 
     print(f"\n{'='*58}\n  Done.\n{'='*58}")
     print(f"\n  Next: validate against ground-truth polygons:")
-    print(f"    python validate.py --truth data/favelas.shp\n")
+    print(f"    python validate.py --truth data/val.shp\n")
 
 
 if __name__ == "__main__":

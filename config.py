@@ -47,6 +47,10 @@ STACKED_BAND_INDEX = {"B2": 1, "B3": 2, "B4": 3, "B8": 4, "B11": 5, "B12": 6}
 REFERENCE_BAND = "B2"
 IMAGE_PATH = (STACKED_PATH if USE_STACKED else BANDS[REFERENCE_BAND])
 
+# ── Training shapefile (polygon-based reference extraction) ───────────────────
+# Set to None to fall back to the REFERENCE_* bounding-box below.
+REFERENCE_SHAPEFILE = os.path.join(DATA_DIR, "train.shp")
+
 # Natural-colour composite (B4-B3-B2) for the overview PNG / reference preview.
 RGB_DISPLAY_BANDS = ["B4", "B3", "B2"]
 
@@ -59,8 +63,8 @@ PIXEL_SIZE_M = 10
 # At 10 m/px:  WINDOW_SIZE px  ->  WINDOW_SIZE * 10 m on the ground.
 #   30 px = 300 m, 50 px = 500 m. Favelas are detected at AGGLOMERATION scale,
 #   not building scale. Tune to your target.
-WINDOW_SIZE = 30     # px  = 300 m on the ground
-STRIDE      = 15     # px  = 50% overlap
+WINDOW_SIZE = 15     # px  = ~150 m — fits the smallest training communities
+STRIDE      = 10     # px  = ~67% overlap
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Reference zone — your known favela area (PIXEL coords ON THE 10 m GRID)
@@ -95,7 +99,7 @@ INDICES = ["NDVI", "NDBI", "BSI", "MNDWI", "SWIR_RATIO"]
 # ─────────────────────────────────────────────────────────────────────────────
 #  DSM / RF — optional extra sources (must be aligned to the 10 m grid)
 # ─────────────────────────────────────────────────────────────────────────────
-USE_DSM  = False
+USE_DSM  = True
 DSM_PATH = os.path.join(DATA_DIR, "dsm.tif")
 
 USE_RF   = False

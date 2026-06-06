@@ -118,16 +118,25 @@ def edge_features(patch: np.ndarray) -> np.ndarray:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def dsm_features(patch_dsm: np.ndarray) -> np.ndarray:
+    """Terrain features: elevation mean/std, roughness, and SLOPE (mean/std).
+
+    Slope (degrees) is the agglomeration-scale steepness — favelas often occupy
+    terrain formal development avoids. Derived per-window from the DSM gradient.
+    """
     valid = patch_dsm[~np.isnan(patch_dsm)]
     if len(valid) == 0:
-        return np.zeros(3, dtype=np.float32)
+        return np.zeros(5, dtype=np.float32)
     mean_h    = float(valid.mean())
     std_h     = float(valid.std())
-    diff_r    = np.abs(np.diff(patch_dsm, axis=0))
-    diff_c    = np.abs(np.diff(patch_dsm, axis=1))
-    roughness = float(np.nanmean(
-        np.concatenate([diff_r.ravel(), diff_c.ravel()])))
-    return np.array([mean_h, std_h, roughness], dtype=np.float32)
+    filled    = np.where(np.isnan(patch_dsm), mean_h, patch_dsm)
+    diff_r    = np.abs(np.diff(filled, axis=0))
+    diff_c    = np.abs(np.diff(filled, axis=1))
+    roughness = float(np.mean(np.concatenate([diff_r.ravel(), diff_c.ravel()])))
+    gy, gx    = np.gradient(filled)                       # elev change per pixel
+    slope     = np.degrees(np.arctan(
+        np.sqrt(gx**2 + gy**2) / float(config.PIXEL_SIZE_M)))
+    return np.array([mean_h, std_h, roughness,
+                     float(slope.mean()), float(slope.std())], dtype=np.float32)
 
 
 def rf_composition_features(patch_rf: np.ndarray) -> np.ndarray:
@@ -165,7 +174,8 @@ def compute_window_features(patch: np.ndarray,
         parts.append(dsm_features(patch_dsm))
     if config.USE_RF and patch_rf is not None:
         parts.append(rf_composition_features(patch_rf))
-    return np.concatenate(parts).astype(np.float32)
+    feat = np.concatenate(parts).astype(np.float32)
+    return np.nan_to_num(feat, nan=0.0, posinf=0.0, neginf=0.0)
 
 
 def feature_names() -> list:
@@ -182,7 +192,8 @@ def feature_names() -> list:
     if config.USE_EDGE and _HAS_CV:
         names += ['edge_density']
     if config.USE_DSM:
-        names += ['DSM_mean', 'DSM_std', 'DSM_roughness']
+        names += ['DSM_mean', 'DSM_std', 'DSM_roughness',
+                  'DSM_slope_mean', 'DSM_slope_std']
     if config.USE_RF:
         names += ['pct_ceramic', 'pct_fiber', 'pct_paved_road',
                   'pct_exposed_soil', 'pct_vegetation',
@@ -235,31 +246,55 @@ def extract_all_windows(image: np.ndarray,
 
 def extract_reference_patches(image: np.ndarray,
                                image_dsm: np.ndarray = None,
-                               image_rf:  np.ndarray = None) -> np.ndarray:
-    r_min, r_max = config.REFERENCE_ROW_MIN, config.REFERENCE_ROW_MAX
-    c_min, c_max = config.REFERENCE_COL_MIN, config.REFERENCE_COL_MAX
-    ws = config.WINDOW_SIZE
-    step = max(1, ws // 2)
+                               image_rf:  np.ndarray = None,
+                               ref_mask:  np.ndarray = None) -> np.ndarray:
+    """Extract feature vectors from the training reference zone.
 
+    ref_mask (bool H×W): when provided, only windows where ≥50% of pixels
+    fall inside a training polygon are accepted.  Falls back to the
+    REFERENCE_* bounding-box in config when ref_mask is None.
+    """
+    ws   = config.WINDOW_SIZE
+    step = max(1, ws // 2)
+    H, W = image.shape[:2]
     ref_patches = []
-    for r in range(r_min, r_max - ws + 1, step):
-        for c in range(c_min, c_max - ws + 1, step):
-            patch     = image[r:r+ws, c:c+ws]
-            patch_dsm = image_dsm[r:r+ws, c:c+ws] if image_dsm is not None else None
-            patch_rf  = image_rf[r:r+ws,  c:c+ws] if image_rf  is not None else None
-            ref_patches.append(
-                compute_window_features(patch, patch_dsm, patch_rf))
+
+    if ref_mask is not None:
+        # Restrict scan to the tight bounding box of the mask for speed.
+        r_nz, c_nz = np.where(ref_mask)
+        if len(r_nz) == 0:
+            raise ValueError("Reference mask is empty — check train.shp.")
+        r0 = int(r_nz.min())
+        r1 = min(H - ws, int(r_nz.max()))
+        c0 = int(c_nz.min())
+        c1 = min(W - ws, int(c_nz.max()))
+        for r in range(r0, r1 + 1, step):
+            for c in range(c0, c1 + 1, step):
+                if ref_mask[r:r+ws, c:c+ws].mean() >= 0.5:
+                    patch     = image[r:r+ws, c:c+ws]
+                    patch_dsm = image_dsm[r:r+ws, c:c+ws] if image_dsm is not None else None
+                    patch_rf  = image_rf[r:r+ws,  c:c+ws] if image_rf  is not None else None
+                    ref_patches.append(compute_window_features(patch, patch_dsm, patch_rf))
+    else:
+        r_min, r_max = config.REFERENCE_ROW_MIN, config.REFERENCE_ROW_MAX
+        c_min, c_max = config.REFERENCE_COL_MIN, config.REFERENCE_COL_MAX
+        for r in range(r_min, r_max - ws + 1, step):
+            for c in range(c_min, c_max - ws + 1, step):
+                patch     = image[r:r+ws, c:c+ws]
+                patch_dsm = image_dsm[r:r+ws, c:c+ws] if image_dsm is not None else None
+                patch_rf  = image_rf[r:r+ws,  c:c+ws] if image_rf  is not None else None
+                ref_patches.append(compute_window_features(patch, patch_dsm, patch_rf))
 
     if not ref_patches:
+        ws_px = config.WINDOW_SIZE
         raise ValueError(
-            "No complete windows fit inside the reference zone.\n"
-            f"Reference is {r_max-r_min}×{c_max-c_min} px but WINDOW_SIZE={ws}.\n"
-            "Enlarge REFERENCE_* or lower WINDOW_SIZE in config.py.")
+            f"No reference windows extracted (WINDOW_SIZE={ws_px}). "
+            "Lower WINDOW_SIZE in config.py or check training polygons.")
 
     ref_matrix = np.stack(ref_patches)
-    print(f"  Reference: {len(ref_patches)} windows from the favela zone")
+    print(f"  Reference: {len(ref_patches)} windows from training zone")
     return ref_matrix
 
 
-def extract_reference_vector(image, image_dsm=None, image_rf=None):
-    return extract_reference_patches(image, image_dsm, image_rf).mean(axis=0)
+def extract_reference_vector(image, image_dsm=None, image_rf=None, ref_mask=None):
+    return extract_reference_patches(image, image_dsm, image_rf, ref_mask).mean(axis=0)
