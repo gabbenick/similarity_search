@@ -85,6 +85,21 @@ def main():
     ws = config.WINDOW_SIZE
     print(f"  {len(df):,} windows × {len(feat_cols)} features")
 
+    # Socioeconomic features (add_socio_features.py) only cover the RMM, so
+    # interior windows are NaN. RF can't take NaN → impute with a sentinel
+    # outside the valid [0,1] range; the has_socio column flags coverage so the
+    # model can route around the sentinel and fall back to spectral+terrain.
+    SOCIO_SENTINEL = -1.0
+    n_nan = int(np.isnan(X).sum())
+    if n_nan:
+        socio_feats = [c for c in feat_cols if c.endswith("_mean")
+                       and c.split("_")[0] not in config.BAND_ORDER
+                       and not c.startswith(("NDVI", "NDBI", "BSI", "MNDWI",
+                                             "SWIR_RATIO", "DSM"))]
+        np.nan_to_num(X, copy=False, nan=SOCIO_SENTINEL)
+        print(f"  imputed {n_nan:,} NaN cells (sentinel {SOCIO_SENTINEL}) — "
+              f"socio features: {', '.join(socio_feats) or 'none'}")
+
     with rasterio.open(config.HEATMAP_PATH) as src:
         transform, crs, shape, profile = (src.transform, src.crs,
                                           (src.height, src.width), src.profile.copy())
@@ -210,6 +225,25 @@ def main():
     with rasterio.open(PROB_MAP_OUT, "w", **profile) as dst:
         dst.write(prob_map.astype(np.float32), 1)
     print(f"  Saved → {PROB_MAP_OUT}")
+
+    # ── RMM-clipped map: the socio model is only valid where socio data exists ──
+    if config.USE_SOCIO and os.path.isfile(config.SOCIO_COVERAGE_RASTER):
+        from rasterio.warp import reproject, Resampling
+        rmm = np.full((H, W), np.nan, np.float32)
+        with rasterio.open(config.SOCIO_COVERAGE_RASTER) as s:
+            reproject(rasterio.band(s, 1), rmm,
+                      src_transform=s.transform, src_crs=s.crs,
+                      dst_transform=transform, dst_crs=crs,
+                      resampling=Resampling.nearest)
+            if s.nodata is not None:
+                rmm[rmm == s.nodata] = np.nan
+        rmm_mask = np.isfinite(rmm)
+        clipped = np.where(rmm_mask, prob_map, np.nan).astype(np.float32)
+        cprof = profile.copy(); cprof.update(nodata=np.nan)
+        with rasterio.open(config.PROB_MAP_RMM_PATH, "w", **cprof) as dst:
+            dst.write(clipped, 1)
+        print(f"  Saved → {config.PROB_MAP_RMM_PATH} "
+              f"(RMM only: {rmm_mask.mean():.0%} of image)")
     print("\nDone.")
 
 

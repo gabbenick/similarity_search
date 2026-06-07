@@ -102,6 +102,24 @@ INDICES = ["NDVI", "NDBI", "BSI", "MNDWI", "SWIR_RATIO"]
 USE_DSM  = True
 DSM_PATH = os.path.join(DATA_DIR, "dsm.tif")
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  Socioeconomic / environmental layers (from Eng. Bibi — EPSG:31985, RMM only)
+#  Reprojected/rasterized to the 10 m grid by add_socio_features.py.
+# ─────────────────────────────────────────────────────────────────────────────
+USE_SOCIO = True
+# (path, output-column, clip-max)  clip-max guards corrupted pixels (None = no clip)
+SOCIO_RASTERS = [
+    (os.path.join(DATA_DIR, "vulnerabilidade_3_rec.tif"),  "vuln_mean",      1.0),
+    (os.path.join(DATA_DIR, "mapa_deslizamento2.tif"),     "landslide_mean", 1.0),
+    (os.path.join(DATA_DIR, "teste_ahp_3_recortado.tif"),  "flood_mean",     1.0),
+]
+SOCIO_INCOME_SHP   = os.path.join(DATA_DIR, "setores_AL_baixa_renda_RMM.shp")
+SOCIO_INCOME_FIELD = "porc_bx_re"          # fraction of households <= 1/2 min wage
+SOCIO_INCOME_COL   = "lowincome_mean"
+SOCIO_COVERAGE_COL = "has_socio"           # 1 where RMM socio data exists, else 0
+# canonical layer whose valid extent defines RMM coverage (for has_socio)
+SOCIO_COVERAGE_RASTER = os.path.join(DATA_DIR, "vulnerabilidade_3_rec.tif")
+
 USE_RF   = False
 RF_PATH  = os.path.join(DATA_DIR, "rf_map.tif")
 RF_CLASS_IDS = {
@@ -135,3 +153,5 @@ SVM_MAP_PATH      = os.path.join(OUTPUT_DIR, "svm_map.tif")
 SVM_SCORE_PATH    = os.path.join(OUTPUT_DIR, "svm_map_score.tif")
 FEATURES_CSV      = os.path.join(OUTPUT_DIR, "features.csv")
 OVERVIEW_PNG      = os.path.join(OUTPUT_DIR, "overview.png")
+# socio model is only valid where socio data exists → RMM-clipped probability map
+PROB_MAP_RMM_PATH = os.path.join(OUTPUT_DIR, "favela_probability_rmm.tif")
