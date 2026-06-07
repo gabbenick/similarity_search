@@ -44,8 +44,10 @@ RMM_PERIPHERY = {"Marechal Deodoro", "Rio Largo", "Barra de Santo Antônio",
 RMM_ALL = RMM_CORE | RMM_PERIPHERY
 
 OBJ_THRESHOLDS = [0.50, 0.70, 0.80, 0.90]
-MIN_REGION_HA  = 0.5     # ignore predicted speckle smaller than this
+MIN_REGION_HA  = 0.5     # ignore predicted speckle smaller than this (raw)
 HIT_FRAC       = 0.25    # truth polygon detected if >= this fraction is flagged
+FILTER_MIN_HA       = 1.0   # post-filter: drop blobs smaller than this
+FILTER_MIN_MEANPROB = 0.60  # post-filter: drop blobs whose mean prob is below this
 
 
 def main():
@@ -101,55 +103,81 @@ def main():
         m = rasterize([(g, 1)], out_shape=shape, transform=transform,
                       fill=0, dtype="uint8").astype(bool)
         if not m.any():
-            return np.nan, np.nan
+            return np.nan, np.nan, np.nan
         v = prob[m]; v = v[np.isfinite(v)]
-        return (v.mean(), v.max()) if v.size else (np.nan, np.nan)
+        if not v.size:
+            return np.nan, np.nan, np.nan
+        return v.mean(), v.max(), np.percentile(v, 90)
 
     stats = pd.DataFrame([zonal(g) for g in rmm_agsn.geometry],
-                         columns=["mean_prob", "max_prob"])
+                         columns=["mean_prob", "max_prob", "p90_prob"])
     stats["scope"] = rmm_agsn.scope.values
-    print("\n  A. AGSN DETECTION inside RMM (% with prob >= T)")
-    print(f"     {'scope':<10}{'n':>5}{'  mean>=0.5':>11}{'mean>=0.7':>10}"
-          f"{'max>=0.5':>10}{'max>=0.7':>10}")
+    # Most "missed" favelas (low whole-polygon mean) still contain a hot window:
+    # report mean / p90 / max so the screening-relevant "any hot window" number
+    # (max) is visible next to the conservative whole-polygon mean.
+    print("\n  A. AGSN DETECTION inside RMM (% of favelas with prob >= T)")
+    print(f"     {'scope':<14}{'n':>5}{'mean>=.5':>10}{'p90>=.5':>9}"
+          f"{'max>=.5':>9}{'max>=.7':>9}")
     for sc in ["core", "periphery", "in-RMM (all)"]:
         g = stats if sc == "in-RMM (all)" else stats[stats.scope == sc]
-        print(f"     {sc:<10}{len(g):>5}{(g.mean_prob>=.5).mean()*100:>10.1f}%"
-              f"{(g.mean_prob>=.7).mean()*100:>9.1f}%"
-              f"{(g.max_prob>=.5).mean()*100:>9.1f}%"
-              f"{(g.max_prob>=.7).mean()*100:>9.1f}%")
+        print(f"     {sc:<14}{len(g):>5}{(g.mean_prob>=.5).mean()*100:>9.1f}%"
+              f"{(g.p90_prob>=.5).mean()*100:>8.1f}%"
+              f"{(g.max_prob>=.5).mean()*100:>8.1f}%"
+              f"{(g.max_prob>=.7).mean()*100:>8.1f}%")
+    touched = (stats.mean_prob < 0.5) & (stats.max_prob >= 0.5)
+    print(f"     → headline detection (any hot window, max>=0.5): "
+          f"{(stats.max_prob>=.5).mean()*100:.1f}%  "
+          f"({touched.sum()} of the {(stats.mean_prob<.5).sum()} low-mean favelas "
+          f"are in fact touched)")
 
     # ── B. object precision / recall inside RMM ───────────────────────────
-    print("\n  B. OBJECT precision/recall inside RMM")
-    print(f"     {'T':>5}{'#pred':>7}{'#hit':>6}{'precision':>11}"
-          f"{'recall_core':>13}{'recall_peri':>13}")
+    # Two variants per threshold: RAW (size>=MIN_REGION_HA only) and FILTERED
+    # (also require blob mean-prob >= FILTER_MIN_MEANPROB and area >= FILTER_MIN_HA).
+    # The filter prunes low-confidence speckle (~half the false blobs are <1 ha),
+    # raising precision at little recall cost.
+    def recall_on(keepmask, gdf):
+        det = 0
+        for g in gdf.geometry:
+            if g is None or g.is_empty:
+                continue
+            pm = rasterize([(g, 1)], out_shape=shape, transform=transform,
+                           fill=0, dtype="uint8").astype(bool)
+            if pm.any() and (keepmask & pm).sum() / pm.sum() >= HIT_FRAC:
+                det += 1
+        return det / max(len(gdf), 1)
+
+    min_filt_px = max(int(FILTER_MIN_HA / px_ha), 1)
+    print("\n  B. OBJECT precision/recall inside RMM   "
+          f"(filtered = area>={FILTER_MIN_HA}ha & mean>={FILTER_MIN_MEANPROB})")
+    print(f"     {'T':>5} | {'#pred':>6}{'prec':>7}{'Rc':>6}{'Rp':>6}"
+          f"  | {'#pred*':>6}{'prec*':>7}{'Rc*':>6}{'Rp*':>6}   (* = filtered)")
     rows = []
     for t in OBJ_THRESHOLDS:
         lab, n = ndimage.label(probz >= t)
         if n == 0:
             print(f"     {t:>5.2f}  no regions"); continue
-        sizes = ndimage.sum(np.ones_like(lab), lab, range(1, n + 1))
-        keep = set((np.where(sizes >= min_region_px)[0] + 1).tolist())
-        keepmask = np.isin(lab, list(keep))
-        hit = set(np.unique(lab[truth & keepmask]).tolist()) - {0}
-        precision = len(hit) / max(len(keep), 1)
+        ids = np.arange(1, n + 1)
+        sizes = ndimage.sum(np.ones_like(lab), lab, ids)
+        bmean = np.array(ndimage.mean(probz, lab, ids))
+        keep = set((ids[sizes >= min_region_px]).tolist())
+        keepf = set((ids[(sizes >= min_filt_px) &
+                         (bmean >= FILTER_MIN_MEANPROB)]).tolist())
 
-        def recall(gdf):
-            det = 0
-            for g in gdf.geometry:
-                if g is None or g.is_empty:
-                    continue
-                pm = rasterize([(g, 1)], out_shape=shape, transform=transform,
-                               fill=0, dtype="uint8").astype(bool)
-                if pm.any() and (keepmask & pm).sum() / pm.sum() >= HIT_FRAC:
-                    det += 1
-            return det / max(len(gdf), 1)
-        r_core = recall(rmm_agsn[rmm_agsn.scope == "core"]) * 100
-        r_peri = recall(rmm_agsn[rmm_agsn.scope == "periphery"]) * 100
-        print(f"     {t:>5.2f}{len(keep):>7}{len(hit):>6}{precision*100:>10.1f}%"
-              f"{r_core:>12.1f}%{r_peri:>12.1f}%")
-        rows.append(dict(threshold=t, n_pred=len(keep), n_hit=len(hit),
-                         precision=precision, recall_core=r_core/100,
-                         recall_peri=r_peri/100))
+        def metrics(keepset):
+            km = np.isin(lab, list(keepset))
+            hit = set(np.unique(lab[truth & km]).tolist()) - {0}
+            prec = len(hit) / max(len(keepset), 1)
+            rc = recall_on(km, rmm_agsn[rmm_agsn.scope == "core"]) * 100
+            rp = recall_on(km, rmm_agsn[rmm_agsn.scope == "periphery"]) * 100
+            return len(keepset), prec, rc, rp
+        n0, p0, rc0, rp0 = metrics(keep)
+        n1, p1, rc1, rp1 = metrics(keepf)
+        print(f"     {t:>5.2f} | {n0:>6}{p0*100:>6.1f}%{rc0:>5.0f}%{rp0:>5.0f}%"
+              f"  | {n1:>6}{p1*100:>6.1f}%{rc1:>5.0f}%{rp1:>5.0f}%")
+        rows.append(dict(threshold=t, n_pred=n0, precision=p0,
+                         recall_core=rc0/100, recall_peri=rp0/100,
+                         n_pred_filt=n1, precision_filt=p1,
+                         recall_core_filt=rc1/100, recall_peri_filt=rp1/100))
     pd.DataFrame(rows).to_csv(OUT_CSV, index=False)
 
     # ── export FALSE blobs at T=0.7 for manual QGIS review ────────────────

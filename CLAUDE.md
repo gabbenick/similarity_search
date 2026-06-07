@@ -35,9 +35,21 @@ hard negatives are the RMM's own built-up confusers). Strong screening tool insi
   → retrain (1–2 rounds). **Caveat:** exclude the RMM *periphery* when mining, since AGSN is
   incomplete there and some "false" blobs are real unmapped favelas (don't mine them as negs).
 
+**Two free wins added (committed):**
+- **Headline detection = "any hot window" (max≥0.5): 96.1%** (vs 83.5% by whole-polygon
+  mean). 32 of the 41 low-mean "missed" favelas are in fact touched — the miss was an
+  averaging artifact. `evaluate_rmm.py` now reports mean / p90 / max.
+- **Blob post-filter** (area≥1 ha & blob-mean≥0.6) in `evaluate_rmm.py`: at T=0.7 precision
+  **18.3% → 26.9% with ZERO recall loss** (72%/68% unchanged); ~half the false blobs were
+  <1 ha speckle. Use the filtered operating point for reporting.
+- `make_figures.py` writes `output/fig_*.png` (ROC/PR AUC 0.979/AP 0.923, calibration,
+  feature importance, object operating curve). Feature story: `vuln_mean` #1, then spectral
+  heterogeneity (`MNDWI_std`, `B2_std`, `NDVI_std`) + `flood_mean`/`lowincome_mean`.
+
 **Open human task:** review `output/false_blobs_rmm.gpkg` in QGIS over the imagery — how many
-"false" blobs are real unmapped favelas? This sets the *true* precision (12–18% is a floor).
-Can't be automated (no IBGE municipal-boundary raster to tile core vs periphery).
+"false" blobs are real unmapped favelas? This sets the *true* precision (current is a floor;
+~half the 380 false blobs are >1 ha and worth inspecting). Can't be automated (no IBGE
+municipal-boundary raster to tile core vs periphery).
 
 **Housekeeping:** `output/features.csv.bak` is a safety backup from the socio integration —
 safe to delete once results are trusted.
@@ -95,6 +107,7 @@ similarity_search/
 ├── evaluate_polygons.py  # polygon/object-level metrics (full image) → polygon_scores.csv
 ├── evaluate_rmm.py       # RMM-scoped object eval (core/periphery) + exports false_blobs_rmm.gpkg
 ├── tune_precision.py     # in-memory precision-lever sweep (RMM-scope, NEG_RATIO, class_weight)
+├── make_figures.py       # thesis figures: ROC/PR, calibration, feature importance, operating curve
 ├── oneclass.py           # legacy One-Class SVM
 ├── validate.py           # legacy validation vs ground-truth shapefile
 ├── comunidades/          # community + AGSN source shapefiles

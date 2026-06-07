@@ -113,8 +113,9 @@ python add_slope_feature.py       # + DSM slope (fast)
 python add_socio_features.py      # + socio/env columns (~40 s)
 
 # 3. Train + evaluate (fast — reuses features.csv)
-python train_supervised.py        # → output/favela_probability_rmm.tif
+python train_supervised.py        # → output/favela_probability_rmm.tif (+ oof_eval.npz)
 python evaluate_rmm.py            # → in-RMM precision/recall + false_blobs_rmm.gpkg
+python make_figures.py            # → output/fig_*.png (ROC/PR, calibration, importance, operating)
 ```
 
 > Normal loop is just step 3. `evaluate_polygons.py` is the older full-image

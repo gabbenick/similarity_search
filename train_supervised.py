@@ -224,6 +224,14 @@ def main():
     for i in np.argsort(-importances)[:10]:
         print(f"    {feat_cols[i]:<18} {importances[i]:.3f}")
 
+    # ── save out-of-fold artifacts for figures (make_figures.py) ──────────
+    eval_npz = os.path.join(config.OUTPUT_DIR, "oof_eval.npz")
+    np.savez(eval_npz,
+             oof_prob=oof_prob, y=y, train_idx=train_idx,
+             hard_neg=hard_neg, importances=importances,
+             feat_cols=np.array(feat_cols, dtype=object))
+    print(f"  Saved out-of-fold artifacts → {eval_npz}")
+
     # ── full-image probability map (out-of-fold) ──────────────────────────
     print("\nBuilding probability heatmap ...")
     H, W = shape
