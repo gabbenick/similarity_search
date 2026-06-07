@@ -83,7 +83,12 @@ def main():
     X = df[feat_cols].to_numpy(np.float32)
     rows = df["row"].to_numpy(); cols = df["col"].to_numpy()
     ws = config.WINDOW_SIZE
-    print(f"  {len(df):,} windows × {len(feat_cols)} features")
+    has_socio = (df["has_socio"].to_numpy().astype(bool)
+                 if "has_socio" in df else np.ones(len(df), bool))
+    rmm_only = getattr(config, "RMM_ONLY", False) and "has_socio" in df
+    print(f"  {len(df):,} windows × {len(feat_cols)} features"
+          + (f" | RMM-only training ({has_socio.sum():,} in-RMM windows)"
+             if rmm_only else ""))
 
     # Socioeconomic features (add_socio_features.py) only cover the RMM, so
     # interior windows are NaN. RF can't take NaN → impute with a sentinel
@@ -111,6 +116,12 @@ def main():
     is_pos  = frac >= POS_OVERLAP
     is_amb  = (frac > 0) & (frac < POS_OVERLAP)     # ambiguous edge — exclude
     is_neg_eligible = frac == 0
+    if rmm_only:
+        # scope training to the RMM: positives AND negatives must have socio
+        # data, so the sampled hard negatives are the RMM's own built-up
+        # confusers (not irrelevant interior land) → better in-RMM precision.
+        is_pos = is_pos & has_socio
+        is_neg_eligible = is_neg_eligible & has_socio
     print(f"  positives (>= {POS_OVERLAP:.0%} AGSN): {is_pos.sum():,}")
     print(f"  ambiguous edge (excluded)           : {is_amb.sum():,}")
     print(f"  negative-eligible (0% AGSN)         : {is_neg_eligible.sum():,}")

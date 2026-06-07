@@ -4,28 +4,40 @@
 
 ---
 
-## ▶ Next session — start here (as of 2026-06-06)
+## ▶ Next session — start here (as of 2026-06-07)
 
-**State:** pipeline fully working end-to-end. Socio/env layers integrated and evaluated.
-Current model = RandomForest (spectral + terrain + socio), out-of-fold, spatial CV.
-Inside the RMM it's a **strong screening tool** (91% AGSN detection); **precision** is the
-open weakness and the model is **blind outside the RMM** (socio coverage limit).
+**SCOPE DECISION: the project now targets the RMM only** — outside-RMM behaviour is
+explicitly out of scope (no socio data there anyway). This retires several old items.
 
-**Agreed immediate next action: A/B test `HistGradientBoostingClassifier` vs RandomForest.**
-- *Why:* today the socio NaNs (outside RMM) are filled with a sentinel −1.0; the hypothesis
-  is that this sentinel is partly *causing* the outside-RMM blindness (model learns
-  "socio = −1 ⇒ not favela"). HGB handles NaN **natively** (learns a per-split direction for
-  missing), so it may degrade more gracefully to spectral+terrain outside the RMM and
-  recover some detection / generalisation **without** hurting precision inside the RMM.
-- *How:* add a `MODEL = "rf" | "hgb"` switch in `train_supervised.py`, keep the same spatial
-  CV and metrics, drop the sentinel imputation for the HGB path (pass NaN through). Run both,
-  compare: (a) precision/recall inside RMM, (b) detection outside RMM, (c) the 7 hand-drawn
-  generalisation set. ~30 s each, no re-extraction.
-- *Decision rule:* if HGB ties inside RMM and improves outside/generalisation → switch.
-  Otherwise document and keep RF.
+**State:** pipeline fully working end-to-end. Current model = RandomForest
+(spectral + terrain + socio), out-of-fold, spatial CV, **trained RMM-only**
+(`config.RMM_ONLY = True`: positives AND negatives sampled only inside the RMM, so the
+hard negatives are the RMM's own built-up confusers). Strong screening tool inside the RMM;
+**object precision is still the open weakness** but materially improved this session.
 
-**Other open items** (lower priority — see "Pending / next steps"): extend socio coverage
-beyond the RMM (the real precision ceiling = data, not hyperparameters), RF tuning, LORO CV.
+**What changed this session (committed):**
+- Scoped training to the RMM (`RMM_ONLY`). This was a clean **PR-curve shift up**, not just
+  a tradeoff: object precision @0.7 **12.2% → 18.3%**, @0.9 **31.8% → 39.0%**; ROC-AUC
+  **0.964 → 0.979**; unseen-set generalisation **0.826 → 0.861**. Recall cost is modest
+  (core @0.7 81.6% → 71.9%) and recoverable by lowering the threshold (detection @0.5 still
+  ~90% core & periphery).
+- New `evaluate_rmm.py` — RMM-scoped object eval (core vs periphery via `AGSN_NM_MU`) and
+  exports `output/false_blobs_rmm.gpkg` (the false positives, for QGIS review).
+- New `tune_precision.py` — in-memory sweep of the precision levers (RMM-scope, NEG_RATIO,
+  class_weight). Established RMM-scope as the win; raising NEG_RATIO/dropping class_weight
+  buys precision only by killing **periphery** recall (78%→14%) → don't over-tighten.
+
+**Agreed immediate next action: hard-negative mining (bootstrap).**
+- *Why:* it's the lever that shifts the PR curve up *without* the recall cost that tightening
+  the prior imposes. Precision is now an in-RMM problem — false blobs are RMM built-up
+  confusers (quarries/industrial/bare soil), not outside-RMM noise (clipping didn't help).
+- *How:* train → predict → take the highest-scoring non-AGSN RMM blobs as new hard negatives
+  → retrain (1–2 rounds). **Caveat:** exclude the RMM *periphery* when mining, since AGSN is
+  incomplete there and some "false" blobs are real unmapped favelas (don't mine them as negs).
+
+**Open human task:** review `output/false_blobs_rmm.gpkg` in QGIS over the imagery — how many
+"false" blobs are real unmapped favelas? This sets the *true* precision (12–18% is a floor).
+Can't be automated (no IBGE municipal-boundary raster to tile core vs periphery).
 
 **Housekeeping:** `output/features.csv.bak` is a safety backup from the socio integration —
 safe to delete once results are trusted.
@@ -61,8 +73,10 @@ similarity_search/
 ├── add_socio_features.py # augments features.csv with socio/env layers (fast)
 ├── build_agsn_truth.py   # comunidades/AGSN_2019.shp → data/agsn_truth.gpkg
 ├── build_handdrawn_test.py # hand-drawn shapefiles → data/handdrawn_test.gpkg
-├── train_supervised.py   # CURRENT model: RF + spatial CV → favela_probability*.tif
-├── evaluate_polygons.py  # polygon/object-level metrics → polygon_scores.csv
+├── train_supervised.py   # CURRENT model: RF + spatial CV → favela_probability*.tif (RMM-scoped)
+├── evaluate_polygons.py  # polygon/object-level metrics (full image) → polygon_scores.csv
+├── evaluate_rmm.py       # RMM-scoped object eval (core/periphery) + exports false_blobs_rmm.gpkg
+├── tune_precision.py     # in-memory precision-lever sweep (RMM-scope, NEG_RATIO, class_weight)
 ├── oneclass.py           # legacy One-Class SVM
 ├── validate.py           # legacy validation vs ground-truth shapefile
 ├── comunidades/          # community + AGSN source shapefiles
@@ -198,6 +212,7 @@ WINDOW_SIZE = 15      # px ≈ 150 m — drives feature extraction (search.py)
 STRIDE      = 10      # px — ~67% overlap
 USE_DSM     = True    # terrain features on
 USE_SOCIO   = True    # socio/env features on (add_socio_features.py)
+RMM_ONLY    = True    # train on in-RMM windows only (positives + negatives); scope decision
 SOCIO_RASTERS, SOCIO_INCOME_SHP, SOCIO_COVERAGE_RASTER, ...  # socio paths/fields
 # Legacy (unsupervised path only): REFERENCE_SHAPEFILE, USE_ONE_CLASS_SVM,
 # SVM_NU, SIMILARITY_METRIC — not used by the supervised RF workflow.
@@ -260,8 +275,14 @@ unsupervised approach fundamentally lacked. Socio features push the favela-vs-ur
 separation further and `vuln_mean` becomes the single most important feature.
 
 ### Polygon / object-level (`evaluate_polygons.py`) — the real use case
+
+> **NOTE (2026-06-07):** the table below is the *pre-RMM-scoping* model. The current
+> RMM-scoped model (`RMM_ONLY=True`, see "Next session") improves object precision to
+> **18.3% @0.7 / 39.0% @0.9** with ROC-AUC 0.979. Use `evaluate_rmm.py` for current
+> in-RMM numbers (core vs periphery). The table is kept for the before/after comparison.
+
 The real use case is flagging candidate *areas*, so pixel precision understates usefulness.
-**Inside vs outside the RMM** (the split that matters, current model):
+**Inside vs outside the RMM** (the split that matters, pre-RMM-scoping model):
 
 | | **Inside RMM** (n=253 AGSN) | Outside RMM (n=20) |
 |---|---|---|
@@ -345,12 +366,21 @@ concentrated in the Maceió core → sample starvation elsewhere). Instead:
 - [x] Integrate socio/env layers (`add_socio_features.py`) — big precision gain inside RMM.
 - [x] Report metrics inside vs outside RMM (table above).
 - [x] RMM-clipped probability map (`favela_probability_rmm.tif`).
-- [ ] A/B vs `HistGradientBoostingClassifier` (native NaN, no sentinel).
-- [ ] Extend socio coverage beyond the RMM (or to all RMM municipalities) — fixes the
-      over-flag floor and the outside-RMM blindness.
-- [ ] Tune RF (depth, n_estimators, negative sampling ratio).
-- [ ] Add LORO / leave-one-region-out CV option + municipality/urban-context feature(s).
+- [x] **RMM-scoped training** (`RMM_ONLY`) — precision @0.7 12.2%→18.3%, ROC 0.964→0.979.
+- [x] RMM-scoped object eval + false-blob export (`evaluate_rmm.py`).
+- [x] Precision-lever sweep (`tune_precision.py`) — RMM-scope wins; don't over-tighten prior.
+- [ ] **Hard-negative mining (bootstrap)** — next lever; shifts PR curve up w/o recall cost.
+      Exclude RMM periphery when mining (AGSN incomplete there).
+- [ ] **Human: review `false_blobs_rmm.gpkg` in QGIS** — how many false blobs are real
+      unmapped favelas? Sets the true precision (current numbers are a floor).
+- [ ] Optional precision/recall dial: expose `NEG_RATIO` in config (sweep showed r8 → P@0.7
+      ~20% but periphery recall 78%→57%).
+- [ ] Add urban-context feature (GHSL/WSF building density) to reject non-residential bright
+      land — the most durable precision fix.
 - [ ] Ask Bibi for raw deprivation components, continuous per-capita income, census year.
+
+**Retired (out of scope — RMM-only decision):** HGB-vs-RF A/B (moot: no NaN inside RMM),
+extending socio outside the RMM, LORO across non-RMM municipalities.
 
 ---
 

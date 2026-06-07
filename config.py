@@ -107,6 +107,11 @@ DSM_PATH = os.path.join(DATA_DIR, "dsm.tif")
 #  Reprojected/rasterized to the 10 m grid by add_socio_features.py.
 # ─────────────────────────────────────────────────────────────────────────────
 USE_SOCIO = True
+# Project scope is the RMM only (where socio data is valid). When True,
+# train_supervised.py samples BOTH positives and negatives only inside the RMM
+# (has_socio==1), so hard negatives are the RMM's own built-up confusers — this
+# materially improves in-RMM object precision (see tune_precision.py).
+RMM_ONLY  = True
 # (path, output-column, clip-max)  clip-max guards corrupted pixels (None = no clip)
 SOCIO_RASTERS = [
     (os.path.join(DATA_DIR, "vulnerabilidade_3_rec.tif"),  "vuln_mean",      1.0),
