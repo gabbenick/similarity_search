@@ -1,128 +1,147 @@
-# Favela Similarity Search
-### Feature-based similarity search for informal settlement detection
-### Maceió, Brazil — 50cm/px aerial imagery
+# Favela Detection — Maceió (RMM)
+
+Detecting informal settlements (*favelas* / *aglomerados subnormais*) in
+**Sentinel-2** satellite imagery over the **Região Metropolitana de Maceió**
+(Alagoas, Brazil), using a supervised machine-learning model trained on IBGE's
+official favela polygons.
+
+The output is a georeferenced **favela-probability map (0–1)** for QGIS, used as
+a **screening / triage tool** to flag candidate areas for review.
+
+> **Scope:** this model is valid **inside the RMM only** (where the
+> socioeconomic data exists). Use `output/favela_probability_rmm.tif`.
+
+---
+
+## Explain it in one paragraph
+
+> We take a satellite image of the Maceió metro region and slide a small window
+> (~150 m) across it. For each window we measure what it looks like — colours and
+> spectral indices, how *mixed* it is (favelas have jumbled rooftops), the terrain,
+> and socioeconomic context (vulnerability, low income, flood/landslide risk). We
+> then train a model on the government's official favela map to learn the
+> difference between a favela and other built-up areas. The result is a heatmap
+> where bright = "likely favela." It catches ~90% of known favelas and is meant to
+> **point reviewers at candidate areas**, not to draw exact boundaries.
+
+**Why it's useful:** the official favela map (IBGE AGSN) is incomplete outside the
+city core. This model can surface settlements that were never mapped — several of
+the "false alarms" it produces turn out to be real, unmapped favelas.
 
 ---
 
 ## How it works
 
-You define one known favela zone in the image. The pipeline characterises
-that zone using texture, colour and edge features, then slides a window
-across the full image computing how similar every location is to the
-reference. The output is a heatmap where bright areas = most similar
-to your favela zone.
-
-No model training required. No large labeled dataset required.
-Just one known example and the rest follows from feature similarity.
-
 ```
-Known favela zone
-      ↓
-Feature vector (texture + colour + edge density)
-      ↓
-Compare to every window in the image
-      ↓
-Similarity heatmap → load in QGIS
+Sentinel-2 bands (10 m)  +  terrain (DSM)  +  socio layers (RMM)
+        ↓
+  slide a 15 px (~150 m) window, stride 10 px
+        ↓
+  32 features / window  (spectral, indices, terrain, socio)
+        ↓
+  RandomForest, favela vs. other-built-up
+  trained on IBGE AGSN polygons, spatial-block cross-validation
+        ↓
+  favela_probability_rmm.tif  (0–1)  → load in QGIS
 ```
+
+- **Supervised** (favela vs. non-favela), not a similarity heatmap. The earlier
+  unsupervised approach could not separate favelas from other urban areas; it is
+  kept only in `search.py` / `oneclass.py` for comparison.
+- **Spatial cross-validation:** the region is split into ~8 km blocks; every window
+  is predicted by a model that never saw its block → no spatial leakage, honest
+  scores even on training favelas.
+- **RMM-scoped training** (`config.RMM_ONLY`): positives *and* negatives are sampled
+  only inside the RMM, so the model learns to reject the RMM's *own* confusing
+  built-up (industrial, quarries, bare soil) instead of irrelevant rural land.
+
+---
+
+## Results (out-of-fold, AGSN-evaluated, inside the RMM)
+
+| Metric | Value |
+|---|---|
+| ROC-AUC (favela vs. rest) | **0.979** |
+| Detection — any hot window (max ≥ 0.5), core / periphery | **96.8% / 91.9%** |
+| Detection — object-level (≥25% lit, T 0.5) | **89.9% / 89.2%** |
+| Object **precision** @ 0.7 / @ 0.9 | 18.3% / 39.0% |
+
+**Read this correctly:**
+- It's a strong **screening** tool — it finds ~90–97% of known favelas.
+- **Precision is a floor, not the truth:** AGSN is complete only in the Maceió core,
+  so some flagged "false" areas in the periphery are real unmapped favelas (see
+  `output/false_blobs_rmm.gpkg` — review in QGIS).
+- **Threshold is the dial:** T ≈ 0.7 for screening; raise it to trade recall for
+  precision.
+
+See `CLAUDE.md` for the full methodology, data inventory, and decision log.
+
+---
+
+## Data (`data/`, gitignored)
+
+- **Sentinel-2:** `B2,B3,B4,B8.tif` (10 m) + `B11,B12.tif` (20 m→10 m). Reference grid:
+  EPSG:4326, ~10 m/px, 8399×7988 px, covering the Alagoas coast incl. the RMM.
+- **Terrain:** `dsm.tif` (UTM 25S, 30 m) — auto-reprojected.
+- **Socio/env (RMM only, EPSG:31985):** vulnerability, landslide & flood
+  susceptibility rasters + low-income census sectors. Cover ~42 % of the image.
+- **Labels:** IBGE AGSN_2019 favela polygons (`comunidades/`) → `data/agsn_truth.gpkg`
+  (273 favelas in-image; 254 inside the RMM). Hand-drawn field communities →
+  `data/handdrawn_test.gpkg` (independent generalisation test).
 
 ---
 
 ## Setup
 
 ```bash
+python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Place your raster in `data/image.tif`.
-
----
-
-## Step 1 — Find your reference coordinates
-
-Open `image.tif` in QGIS. Hover over the corners of your known
-favela zone. The bottom bar shows X, Y in map coordinates.
-
-Convert to pixel coordinates:
-```bash
-python coords.py --info           # see image extent
-python coords.py --x 652300 --y 8840500   # convert a point
-python coords.py                  # interactive mode
-```
-
----
-
-## Step 2 — Set reference zone in config.py
-
-```python
-REFERENCE_COL_MIN = 800   # left edge of favela (pixels)
-REFERENCE_COL_MAX = 1200  # right edge
-REFERENCE_ROW_MIN = 600   # top edge
-REFERENCE_ROW_MAX = 1000  # bottom edge
-```
-
----
-
-## Step 3 — Run the search
+## Run (current supervised workflow)
 
 ```bash
-python search.py
+source venv/bin/activate
+
+# 1. Build ground-truth layers (only if the shapefiles changed)
+python build_agsn_truth.py        # → data/agsn_truth.gpkg
+python build_handdrawn_test.py    # → data/handdrawn_test.gpkg
+
+# 2. Extract features (slow, ~671k windows — only if bands/config change)
+python search.py                  # → output/features.csv
+python add_slope_feature.py       # + DSM slope (fast)
+python add_socio_features.py      # + socio/env columns (~40 s)
+
+# 3. Train + evaluate (fast — reuses features.csv)
+python train_supervised.py        # → output/favela_probability_rmm.tif
+python evaluate_rmm.py            # → in-RMM precision/recall + false_blobs_rmm.gpkg
 ```
 
-Takes ~1-2 minutes for a 2000×2000 image.
+> Normal loop is just step 3. `evaluate_polygons.py` is the older full-image
+> evaluator; `evaluate_rmm.py` is the current RMM-scoped one.
 
----
-
-## Step 4 — Load results in QGIS
-
-```
-Layer → Add Layer → Add Raster Layer → output/heatmap.tif
-```
-
-Style: Properties → Symbology → Singleband pseudocolor
-Color ramp: Reds or Spectral reversed
-Higher values = more similar to your reference favela zone.
-
-Also load `output/heatmap_norm.tif` — same data scaled 0-255,
-sometimes easier to style in QGIS.
-
----
-
-## Step 5 — Add slope/DSM later
-
-When you have altitude data, place it in `data/dsm.tif` and set:
+## Key config (`config.py`)
 
 ```python
-USE_DSM = True   # in config.py
+WINDOW_SIZE = 15      # px ≈ 150 m
+STRIDE      = 10      # px (~67% overlap)
+USE_DSM     = True    # terrain features
+USE_SOCIO   = True    # socio/env features
+RMM_ONLY    = True    # train inside the RMM only (scope decision)
 ```
 
-Rerun `search.py`. The altitude features (mean height, height
-variation, surface roughness) will be added to the feature vector,
-improving discrimination between informal and formal areas.
+## Load in QGIS
+
+```
+Layer → Add Raster Layer → output/favela_probability_rmm.tif
+Symbology → Singleband pseudocolor, ramp Reds, 0–1.   Triage at ≈ 0.7.
+```
+
+Also load `output/false_blobs_rmm.gpkg` to review flagged areas that don't match a
+known favela — some are real unmapped settlements.
 
 ---
 
-## Output files
-
-| File | Description |
-|---|---|
-| `output/heatmap.tif` | Float32 similarity map — load in QGIS |
-| `output/heatmap_norm.tif` | Same, scaled 0-255 (uint8) |
-| `output/features.csv` | Per-window feature table — inspect values |
-| `output/overview.png` | Quick visual check without opening QGIS |
-
----
-
-## Tuning
-
-**Window size** — controls the scale of analysis:
-- `WINDOW_SIZE = 100` → 50m × 50m  (fine, sees individual blocks)
-- `WINDOW_SIZE = 200` → 100m × 100m  (recommended, neighbourhood scale)
-- `WINDOW_SIZE = 400` → 200m × 200m  (coarse, district scale)
-
-**Stride** — controls overlap and heatmap smoothness:
-- `STRIDE = WINDOW_SIZE` → no overlap, faster
-- `STRIDE = WINDOW_SIZE // 2` → 50% overlap, smoother (recommended)
-
-**Similarity metric**:
-- `"cosine"` → recommended, scale-invariant
-- `"euclidean"` → try if cosine gives flat results
+*Earlier docs `README_SENTINEL2.md` (Sentinel-2 migration notes) and the
+unsupervised/One-Class workflow are historical and superseded by the supervised
+pipeline described here.*

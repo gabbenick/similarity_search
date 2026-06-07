@@ -1,5 +1,11 @@
 # Sentinel-2 edition — what changed and how to run
 
+> **⚠️ HISTORICAL / SUPERSEDED.** These are the original migration notes from the
+> aerial→Sentinel-2 move, describing the *unsupervised* similarity / One-Class SVM
+> workflow. The project has since moved to a **supervised RandomForest** trained on
+> IBGE AGSN polygons, scoped to the RMM. See `README.md` and `CLAUDE.md` for the
+> current pipeline. Kept for reference only.
+
 Adaptation of the favela similarity-search pipeline from **aerial 0.5 m RGB**
 to **multi-band Sentinel-2** (B2, B3, B4, B8, B11, B12), plus a validation
 script for ground-truth polygons.

@@ -59,6 +59,24 @@ used as a **screening / triage tool** to flag candidate areas.
 > in `search.py`/`oneclass.py` but is **superseded** — it could not separate favelas from
 > other built-up areas. Kept only for comparison.
 
+### How to explain it to someone (plain language)
+
+> We take a satellite image of the Maceió metro region (RMM) and slide a small ~150 m
+> window across it. For each window we measure what it looks like — colours and spectral
+> indices, how *visually mixed* it is (favelas have jumbled, varied rooftops), the terrain,
+> and socioeconomic context (vulnerability, low income, flood/landslide risk). We train a
+> model on the **government's official favela map** (IBGE AGSN) so it learns the difference
+> between a favela and other built-up land. The result is a **heatmap: bright = likely
+> favela**. It catches ~90% of known favelas and is meant to **point people at candidate
+> areas to review**, not to draw exact boundaries.
+
+Three honest points to make when presenting:
+1. **It's a screening tool, not a map.** High recall (~90–97% of known favelas touched),
+   modest precision — it over-flags on purpose, and a reviewer confirms.
+2. **Its "false alarms" are partly real.** The official map is incomplete outside the city
+   core, so some flagged areas are genuinely unmapped favelas (a *feature* for discovery).
+3. **It only works inside the RMM** (that's where the socioeconomic data exists).
+
 ---
 
 ## Repository layout
