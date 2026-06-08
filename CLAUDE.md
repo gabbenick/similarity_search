@@ -178,10 +178,18 @@ completeness/diversity and resolution.**
 - **RF, not HGB.** HGB's native-NaN advantage is moot inside the RMM (no NaN there).
 - **RF, not SVM — now benchmarked on satellite** (`compare_models.py`, same labels/CV):
   RF **ROC 0.979 / PR 0.960** vs supervised RBF-SVM **0.966 / 0.937** on favela-vs-hard-urban.
-  The old "SVM ROC ~0.5" was the *unsupervised One-Class* SVM and came from the **aerial**
-  work — never scored on Sentinel-2. So: supervised beats unsupervised (the paper's real
-  contrast), and within supervised, RF edges a fair RBF-SVM while also giving native
-  missing-data handling, probabilities, and interpretability.
+  RF edges a fair RBF-SVM and adds native missing-data handling, probabilities, and
+  interpretability.
+- **Paradigm comparison, quantified on equal footing** (`compare_paradigms.py`, same labeled
+  set + spatial CV) — the paper's real contrast. On **favela-vs-hard-urban**:
+  | approach | ROC | PR | note |
+  |---|---|---|---|
+  | Cosine similarity (1 reference, no negatives) | **0.496** | 0.321 | coin-flip — *confirms* the old "~0.5" claim, on satellite |
+  | One-Class SVM (positives only, no negatives) | 0.855 | 0.748 | better than expected, but no negatives = ceiling |
+  | RandomForest (supervised, +negatives) | **0.979** | 0.960 | the production model |
+  **Correction:** the long-cited "~0.5" was the *cosine-similarity* approach, **not** the
+  One-Class SVM (which is 0.855). The monotonic story = one reference → full positive
+  distribution → +negatives; **the negatives are the jump** (0.855 → 0.979 on the hard task).
 - **One global model + region as context, NOT one model per municipality** (273 favelas
   concentrated in the core → sample starvation). Report core vs periphery instead.
 - **Screening tool, not a delineator.** Operate at T≈0.7 on the RMM-clipped map; report

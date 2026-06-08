@@ -86,11 +86,23 @@ RF wins on every metric, *and* the SVM can't cleanly handle the missing socio da
 native probabilities/importances. Note: the old "SVM ROC ≈ 0.5" refers to the **unsupervised
 One-Class** SVM and traces to the **aerial** work — it was never scored on Sentinel-2.
 
-**Framing for the paper:** the headline contrast is the **paradigm shift** — unsupervised
-similarity / One-Class (ROC ≈ 0.5, can't separate favela from other built-up) → **supervised
-classification with socioeconomic fusion** (ROC ≈ 0.98). RF-vs-SVM is a model-selection
-footnote *inside* the supervised arm, not the contribution. The other novel angle is the
-**label-incompleteness finding** (the model surfaces unmapped favelas the registry misses).
+**Paradigm comparison — the paper's headline contrast** (`compare_paradigms.py`, all scored
+on the *same* labeled windows + spatial CV). On the favela-vs-hard-urban task (the one that
+matters):
+
+| Approach | uses negatives? | ROC | PR |
+|---|---|---|---|
+| Cosine similarity (1 reference favela) | no | **0.496** | 0.321 |
+| One-Class SVM (positives only) | no | 0.855 | 0.748 |
+| **RandomForest (supervised)** | **yes** | **0.979** | 0.960 |
+
+Reading: cosine similarity is **coin-flip** on favela-vs-other-urban (0.496 — this is what the
+old "~0.5" claim really was, now confirmed on satellite). Adding the full positive distribution
+(One-Class) helps; **adding negatives (supervision) is the jump** (0.855 → 0.979). That is the
+paper's core methodological result: *you need supervision with negatives to separate favela
+from other built-up.* RF-vs-SVM is a model-selection footnote *inside* the supervised arm. The
+other novel angle is the **label-incompleteness finding** (the model surfaces unmapped favelas
+the registry misses).
 
 **Top features:** socio-environmental vulnerability (#1), flood susceptibility, then spectral
 **heterogeneity** (MNDWI_std, B2_std, NDVI_std) and low-income share. Interpretation: a favela
