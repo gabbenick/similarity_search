@@ -5,6 +5,28 @@
 
 ---
 
+## ▶ Next session — start here (as of 2026-06-08)
+
+**State:** complete and pushed to `main` (commit `b7fbcc9`). RMM-scoped RandomForest works
+end-to-end; results are thesis-ready — ROC **0.979**, **~96%** detection (any hot window),
+object precision **18–27% @0.7** (a *floor*, see §8). Docs (this + `README.md`) are
+self-contained; the curated bundle for the QGIS collaborator is in `output_share/`.
+
+**#1 next action — hard-negative mining** (§10): the one lever that lifts precision *without*
+the recall cost of tightening the prior. Train → predict → add the top-scoring non-AGSN
+**core** blobs as hard negatives → retrain. **Exclude the periphery** when mining (its
+"false" blobs may be real unmapped favelas).
+
+**Blocked on a human:** QGIS verification of `false_blobs_rmm.gpkg` → yields the *true*
+precision and new positive labels. Until then, all precision numbers are a floor.
+
+**Thesis framing:** this is **supervised classification for favela detection**, *not*
+similarity search (the repo name is legacy — see §11). Lead with §7 results + §8 limitations;
+the honest data caveats (concentration, label incompleteness, resolution, circularity) are
+the part to state explicitly, not hide.
+
+---
+
 ## 1. What this is
 
 Supervised detection of favelas (informal settlements) in **Sentinel-2** imagery over the
@@ -36,6 +58,8 @@ evaluate_rmm.py        RMM-scoped object eval (core/periphery) → rmm_object_sc
 evaluate_polygons.py   older full-image object eval → polygon_scores.csv
 tune_precision.py      in-memory sweep of precision levers (RMM-scope, NEG_RATIO, class_weight)
 make_figures.py        figures → output/fig_*.png
+make_classified_map.py threshold prob map → favela_classified_rmm.tif (binary) + favela_predicted_rmm.gpkg (polygons). Default T=0.7, post-filtered to match the reported precision; --no-filter / --threshold to vary.
+make_comparison_figure.py 3-panel slide figure (RGB | probability | binary) → output/fig_comparison.png
 search.py/oneclass.py  LEGACY unsupervised path (cosine heatmap + One-Class SVM) — superseded
 ```
 
@@ -152,6 +176,12 @@ completeness/diversity and resolution.**
 ## 9. Key decisions
 
 - **RF, not HGB.** HGB's native-NaN advantage is moot inside the RMM (no NaN there).
+- **RF, not SVM — now benchmarked on satellite** (`compare_models.py`, same labels/CV):
+  RF **ROC 0.979 / PR 0.960** vs supervised RBF-SVM **0.966 / 0.937** on favela-vs-hard-urban.
+  The old "SVM ROC ~0.5" was the *unsupervised One-Class* SVM and came from the **aerial**
+  work — never scored on Sentinel-2. So: supervised beats unsupervised (the paper's real
+  contrast), and within supervised, RF edges a fair RBF-SVM while also giving native
+  missing-data handling, probabilities, and interpretability.
 - **One global model + region as context, NOT one model per municipality** (273 favelas
   concentrated in the core → sample starvation). Report core vs periphery instead.
 - **Screening tool, not a delineator.** Operate at T≈0.7 on the RMM-clipped map; report
@@ -179,6 +209,10 @@ completeness/diversity and resolution.**
 
 - **Branches:** `main` = current supervised RMM pipeline; `drone-50cm-image` = original 0.5 m
   aerial/unsupervised version (preserved); `sentinel2-support` = working branch (= main).
+- **Repo name is legacy:** `similarity_search` reflects the *original* approach (cosine
+  similarity to one reference favela + One-Class SVM), which was superseded because it could
+  not separate favela from other built-up (ROC ~0.5). The current pipeline is **supervised
+  classification**, not similarity search. Describe it as such in the thesis.
 - **Cosmetic warnings (not bugs):** `Mean of empty slice` (all-zero edge patches, handled by
   `nan_to_num`); `Ground extent ≈ 1 m` (print bug — `pixel_size` in degrees, real ≈10 m);
   geographic-CRS centroid warnings (negligible at this scale).
